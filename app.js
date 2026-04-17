@@ -8,6 +8,8 @@ const state = {
   assignments: [],
   shiftName: "Day Shift",
   auditDate: getTodayDateInputValue(),
+  emailEnabled: false,
+  databaseMode: "sqlite",
   loading: false,
 };
 
@@ -51,6 +53,10 @@ async function initialize() {
   bindEvents();
   elements.auditDate.value = state.auditDate;
   elements.shiftName.value = state.shiftName;
+  const config = await requestJson("/api/config");
+  state.emailEnabled = Boolean(config.emailEnabled);
+  state.databaseMode = config.database;
+  elements.sendAllBtn.textContent = state.emailEnabled ? "Send All Emails" : "Open All Email Drafts";
   await loadManagers();
 }
 
@@ -309,8 +315,15 @@ function renderAssignments() {
     const sendBtn = document.createElement("button");
     sendBtn.className = "primary-btn";
     sendBtn.type = "button";
-    sendBtn.textContent = "Open Email Draft";
-    sendBtn.addEventListener("click", () => openMailDraft(assignment));
+    sendBtn.textContent = state.emailEnabled ? "Send Email" : "Open Email Draft";
+    sendBtn.addEventListener("click", async () => {
+      if (state.emailEnabled) {
+        await sendOneEmail(assignment.id);
+        return;
+      }
+
+      openMailDraft(assignment);
+    });
 
     card.appendChild(sendBtn);
     elements.emailActions.appendChild(card);
@@ -500,9 +513,38 @@ function openAllDrafts() {
     return;
   }
 
+  if (state.emailEnabled) {
+    sendAllEmails().catch(handleUnexpectedError);
+    return;
+  }
+
   for (const assignment of state.assignments) {
     openMailDraft(assignment);
   }
+}
+
+async function sendAllEmails() {
+  if (!state.activeManagerId) {
+    return;
+  }
+
+  const result = await requestJson(`/api/managers/${state.activeManagerId}/send-emails`, {
+    method: "POST",
+  });
+
+  alert(`Sent ${result.sentCount} email(s).`);
+}
+
+async function sendOneEmail(assignmentId) {
+  if (!state.activeManagerId) {
+    return;
+  }
+
+  await requestJson(`/api/managers/${state.activeManagerId}/assignments/${assignmentId}/send-email`, {
+    method: "POST",
+  });
+
+  alert("Email sent.");
 }
 
 async function requestJson(url, options = {}) {
@@ -516,6 +558,17 @@ async function requestJson(url, options = {}) {
 
   if (response.status === 204) {
     return null;
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+
+  if (!contentType.includes("application/json")) {
+    const text = await response.text();
+    if (text.startsWith("<!DOCTYPE") || text.startsWith("<html")) {
+      throw new Error("The app expected JSON from the API but received HTML. Start the app with `npm start` and open it through the server URL, not by opening index.html directly.");
+    }
+
+    throw new Error("The server returned an unexpected response.");
   }
 
   const data = await response.json();

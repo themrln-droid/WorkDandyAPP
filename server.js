@@ -1,35 +1,32 @@
 const path = require("path");
 const express = require("express");
+const { Resend } = require("resend");
 const db = require("./db");
+const store = require("./store");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const TOTAL_SHELVES = 48;
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 app.use(express.json());
 app.use(express.static(__dirname));
 
 app.get("/api/health", (_request, response) => {
-  response.json({ ok: true });
+  response.json({ ok: true, database: db.getMode() });
 });
 
-app.get("/api/managers", (_request, response) => {
-  const managers = db.prepare(`
-    SELECT
-      managers.id,
-      managers.name,
-      managers.email,
-      COUNT(employees.id) AS employeeCount
-    FROM managers
-    LEFT JOIN employees ON employees.manager_id = managers.id
-    GROUP BY managers.id
-    ORDER BY managers.name COLLATE NOCASE
-  `).all();
-
-  response.json(managers);
+app.get("/api/config", (_request, response) => {
+  response.json({
+    emailEnabled: Boolean(process.env.RESEND_API_KEY && process.env.EMAIL_FROM),
+    database: db.getMode(),
+  });
 });
 
-app.post("/api/managers", (request, response) => {
+app.get("/api/managers", async (_request, response) => {
+  response.json(await store.listManagers());
+});
+
+app.post("/api/managers", async (request, response) => {
   const name = sanitizeName(request.body?.name);
   const email = sanitizeEmail(request.body?.email);
 
@@ -38,24 +35,14 @@ app.post("/api/managers", (request, response) => {
   }
 
   try {
-    const result = db.prepare(`
-      INSERT INTO managers (name, email)
-      VALUES (?, ?)
-    `).run(name, email);
-
-    const manager = db.prepare(`
-      SELECT id, name, email, 0 AS employeeCount
-      FROM managers
-      WHERE id = ?
-    `).get(result.lastInsertRowid);
-
+    const manager = await store.createManager(name, email);
     return response.status(201).json(manager);
   } catch (error) {
     return handleDatabaseError(error, response, "manager");
   }
 });
 
-app.put("/api/managers/:managerId", (request, response) => {
+app.put("/api/managers/:managerId", async (request, response) => {
   const managerId = Number(request.params.managerId);
   const name = sanitizeName(request.body?.name);
   const email = sanitizeEmail(request.body?.email);
@@ -65,27 +52,11 @@ app.put("/api/managers/:managerId", (request, response) => {
   }
 
   try {
-    const result = db.prepare(`
-      UPDATE managers
-      SET name = ?, email = ?
-      WHERE id = ?
-    `).run(name, email, managerId);
+    const manager = await store.updateManager(managerId, name, email);
 
-    if (!result.changes) {
+    if (!manager) {
       return response.status(404).json({ error: "Manager not found." });
     }
-
-    const manager = db.prepare(`
-      SELECT
-        managers.id,
-        managers.name,
-        managers.email,
-        COUNT(employees.id) AS employeeCount
-      FROM managers
-      LEFT JOIN employees ON employees.manager_id = managers.id
-      WHERE managers.id = ?
-      GROUP BY managers.id
-    `).get(managerId);
 
     return response.json(manager);
   } catch (error) {
@@ -93,40 +64,33 @@ app.put("/api/managers/:managerId", (request, response) => {
   }
 });
 
-app.delete("/api/managers/:managerId", (request, response) => {
+app.delete("/api/managers/:managerId", async (request, response) => {
   const managerId = Number(request.params.managerId);
 
   if (!managerId) {
     return response.status(400).json({ error: "Valid manager id is required." });
   }
 
-  const result = db.prepare("DELETE FROM managers WHERE id = ?").run(managerId);
+  const deleted = await store.deleteManager(managerId);
 
-  if (!result.changes) {
+  if (!deleted) {
     return response.status(404).json({ error: "Manager not found." });
   }
 
   return response.status(204).send();
 });
 
-app.get("/api/managers/:managerId/employees", (request, response) => {
+app.get("/api/managers/:managerId/employees", async (request, response) => {
   const managerId = Number(request.params.managerId);
 
   if (!managerId) {
     return response.status(400).json({ error: "Valid manager id is required." });
   }
 
-  const employees = db.prepare(`
-    SELECT id, manager_id AS managerId, name, email
-    FROM employees
-    WHERE manager_id = ?
-    ORDER BY name COLLATE NOCASE
-  `).all(managerId);
-
-  response.json(employees);
+  response.json(await store.listEmployees(managerId));
 });
 
-app.post("/api/managers/:managerId/employees", (request, response) => {
+app.post("/api/managers/:managerId/employees", async (request, response) => {
   const managerId = Number(request.params.managerId);
   const name = sanitizeName(request.body?.name);
   const email = sanitizeEmail(request.body?.email);
@@ -135,29 +99,19 @@ app.post("/api/managers/:managerId/employees", (request, response) => {
     return response.status(400).json({ error: "Valid employee details are required." });
   }
 
-  if (!managerExists(managerId)) {
+  if (!(await store.managerExists(managerId))) {
     return response.status(404).json({ error: "Manager not found." });
   }
 
   try {
-    const result = db.prepare(`
-      INSERT INTO employees (manager_id, name, email)
-      VALUES (?, ?, ?)
-    `).run(managerId, name, email);
-
-    const employee = db.prepare(`
-      SELECT id, manager_id AS managerId, name, email
-      FROM employees
-      WHERE id = ?
-    `).get(result.lastInsertRowid);
-
+    const employee = await store.createEmployee(managerId, name, email);
     return response.status(201).json(employee);
   } catch (error) {
     return handleDatabaseError(error, response, "employee");
   }
 });
 
-app.put("/api/managers/:managerId/employees/:employeeId", (request, response) => {
+app.put("/api/managers/:managerId/employees/:employeeId", async (request, response) => {
   const managerId = Number(request.params.managerId);
   const employeeId = Number(request.params.employeeId);
   const name = sanitizeName(request.body?.name);
@@ -168,21 +122,11 @@ app.put("/api/managers/:managerId/employees/:employeeId", (request, response) =>
   }
 
   try {
-    const result = db.prepare(`
-      UPDATE employees
-      SET name = ?, email = ?
-      WHERE id = ? AND manager_id = ?
-    `).run(name, email, employeeId, managerId);
+    const employee = await store.updateEmployee(managerId, employeeId, name, email);
 
-    if (!result.changes) {
+    if (!employee) {
       return response.status(404).json({ error: "Employee not found." });
     }
-
-    const employee = db.prepare(`
-      SELECT id, manager_id AS managerId, name, email
-      FROM employees
-      WHERE id = ?
-    `).get(employeeId);
 
     return response.json(employee);
   } catch (error) {
@@ -190,7 +134,7 @@ app.put("/api/managers/:managerId/employees/:employeeId", (request, response) =>
   }
 });
 
-app.delete("/api/managers/:managerId/employees/:employeeId", (request, response) => {
+app.delete("/api/managers/:managerId/employees/:employeeId", async (request, response) => {
   const managerId = Number(request.params.managerId);
   const employeeId = Number(request.params.employeeId);
 
@@ -198,64 +142,37 @@ app.delete("/api/managers/:managerId/employees/:employeeId", (request, response)
     return response.status(400).json({ error: "Valid employee id is required." });
   }
 
-  const result = db.prepare(`
-    DELETE FROM employees
-    WHERE id = ? AND manager_id = ?
-  `).run(employeeId, managerId);
+  const deleted = await store.deleteEmployee(managerId, employeeId);
 
-  if (!result.changes) {
+  if (!deleted) {
     return response.status(404).json({ error: "Employee not found." });
   }
 
   return response.status(204).send();
 });
 
-app.get("/api/managers/:managerId/assignments", (request, response) => {
+app.get("/api/managers/:managerId/assignments", async (request, response) => {
   const managerId = Number(request.params.managerId);
 
   if (!managerId) {
     return response.status(400).json({ error: "Valid manager id is required." });
   }
 
-  const assignments = db.prepare(`
-    SELECT
-      assignments.id,
-      assignments.manager_id AS managerId,
-      assignments.employee_id AS employeeId,
-      employees.name AS employeeName,
-      employees.email AS employeeEmail,
-      managers.name AS managerName,
-      managers.email AS managerEmail,
-      assignments.shift_name AS shiftName,
-      assignments.audit_date AS auditDate,
-      assignments.shelf_start AS shelfStart,
-      assignments.shelf_end AS shelfEnd,
-      assignments.shelf_count AS shelfCount
-    FROM assignments
-    INNER JOIN employees ON employees.id = assignments.employee_id
-    INNER JOIN managers ON managers.id = assignments.manager_id
-    WHERE assignments.manager_id = ?
-    ORDER BY assignments.shelf_start ASC
-  `).all(managerId).map((assignment) => ({
-    ...assignment,
-    shelfLabel: `${assignment.shelfStart}-${assignment.shelfEnd}`,
-  }));
-
-  response.json(assignments);
+  response.json(await store.listAssignments(managerId));
 });
 
-app.delete("/api/managers/:managerId/assignments", (request, response) => {
+app.delete("/api/managers/:managerId/assignments", async (request, response) => {
   const managerId = Number(request.params.managerId);
 
   if (!managerId) {
     return response.status(400).json({ error: "Valid manager id is required." });
   }
 
-  db.prepare("DELETE FROM assignments WHERE manager_id = ?").run(managerId);
+  await store.clearAssignments(managerId);
   return response.status(204).send();
 });
 
-app.post("/api/managers/:managerId/assignments", (request, response) => {
+app.post("/api/managers/:managerId/assignments", async (request, response) => {
   const managerId = Number(request.params.managerId);
   const presentEmployeeIds = Array.isArray(request.body?.presentEmployeeIds)
     ? request.body.presentEmployeeIds.map(Number).filter(Boolean)
@@ -271,93 +188,134 @@ app.post("/api/managers/:managerId/assignments", (request, response) => {
     return response.status(400).json({ error: "Select at least one employee who is present for the shift." });
   }
 
-  const placeholders = presentEmployeeIds.map(() => "?").join(", ");
-  const employees = db.prepare(`
-    SELECT id, name, email
-    FROM employees
-    WHERE manager_id = ? AND id IN (${placeholders})
-    ORDER BY name COLLATE NOCASE
-  `).all(managerId, ...presentEmployeeIds);
+  const assignments = await store.createAssignments(managerId, presentEmployeeIds, shiftName, auditDate);
 
-  if (!employees.length) {
-    return response.status(400).json({ error: "No valid employees were found for this manager." });
-  }
-
-  const manager = db.prepare("SELECT id, name, email FROM managers WHERE id = ?").get(managerId);
-
-  if (!manager) {
+  if (assignments === null) {
     return response.status(404).json({ error: "Manager not found." });
   }
 
-  const removeAssignments = db.prepare("DELETE FROM assignments WHERE manager_id = ?");
-  const insertAssignment = db.prepare(`
-    INSERT INTO assignments (
-      manager_id, employee_id, shift_name, audit_date, shelf_start, shelf_end, shelf_count
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
+  response.status(201).json(assignments);
+});
 
-  const saveAssignments = db.transaction(() => {
-    removeAssignments.run(managerId);
+app.post("/api/managers/:managerId/send-emails", async (request, response) => {
+  const managerId = Number(request.params.managerId);
 
-    const baseCount = Math.floor(TOTAL_SHELVES / employees.length);
-    const remainder = TOTAL_SHELVES % employees.length;
-    let nextShelf = 1;
+  if (!managerId) {
+    return response.status(400).json({ error: "Valid manager id is required." });
+  }
 
-    for (const [index, employee] of employees.entries()) {
-      const shelfCount = baseCount + (index < remainder ? 1 : 0);
-      const shelfStart = nextShelf;
-      const shelfEnd = nextShelf + shelfCount - 1;
-      nextShelf = shelfEnd + 1;
+  if (!resend || !process.env.EMAIL_FROM) {
+    return response.status(400).json({ error: "Automatic email sending is not configured yet." });
+  }
 
-      insertAssignment.run(
-        managerId,
-        employee.id,
-        shiftName,
-        auditDate,
-        shelfStart,
-        shelfEnd,
-        shelfCount
-      );
-    }
+  const assignments = await store.listAssignments(managerId);
+
+  if (!assignments.length) {
+    return response.status(400).json({ error: "Generate assignments before sending emails." });
+  }
+
+  const sent = [];
+
+  for (const assignment of assignments) {
+    const result = await resend.emails.send({
+      from: process.env.EMAIL_FROM,
+      to: [assignment.employeeEmail],
+      subject: buildEmailSubject(assignment),
+      html: buildEmailHtml(assignment),
+      text: buildEmailText(assignment),
+      replyTo: process.env.EMAIL_REPLY_TO || undefined,
+    });
+
+    sent.push({
+      employeeEmail: assignment.employeeEmail,
+      id: result.data?.id || null,
+    });
+  }
+
+  response.json({ sentCount: sent.length, sent });
+});
+
+app.post("/api/managers/:managerId/assignments/:assignmentId/send-email", async (request, response) => {
+  const managerId = Number(request.params.managerId);
+  const assignmentId = Number(request.params.assignmentId);
+
+  if (!managerId || !assignmentId) {
+    return response.status(400).json({ error: "Valid manager and assignment ids are required." });
+  }
+
+  if (!resend || !process.env.EMAIL_FROM) {
+    return response.status(400).json({ error: "Automatic email sending is not configured yet." });
+  }
+
+  const assignments = await store.listAssignments(managerId);
+  const assignment = assignments.find((item) => item.id === assignmentId);
+
+  if (!assignment) {
+    return response.status(404).json({ error: "Assignment not found." });
+  }
+
+  const result = await resend.emails.send({
+    from: process.env.EMAIL_FROM,
+    to: [assignment.employeeEmail],
+    subject: buildEmailSubject(assignment),
+    html: buildEmailHtml(assignment),
+    text: buildEmailText(assignment),
+    replyTo: process.env.EMAIL_REPLY_TO || undefined,
   });
 
-  saveAssignments();
-
-  const assignments = db.prepare(`
-    SELECT
-      assignments.id,
-      assignments.manager_id AS managerId,
-      assignments.employee_id AS employeeId,
-      employees.name AS employeeName,
-      employees.email AS employeeEmail,
-      managers.name AS managerName,
-      managers.email AS managerEmail,
-      assignments.shift_name AS shiftName,
-      assignments.audit_date AS auditDate,
-      assignments.shelf_start AS shelfStart,
-      assignments.shelf_end AS shelfEnd,
-      assignments.shelf_count AS shelfCount
-    FROM assignments
-    INNER JOIN employees ON employees.id = assignments.employee_id
-    INNER JOIN managers ON managers.id = assignments.manager_id
-    WHERE assignments.manager_id = ?
-    ORDER BY assignments.shelf_start ASC
-  `).all(managerId).map((assignment) => ({
-    ...assignment,
-    shelfLabel: `${assignment.shelfStart}-${assignment.shelfEnd}`,
-  }));
-
-  response.status(201).json(assignments);
+  response.json({ id: result.data?.id || null });
 });
 
 app.use((_request, response) => {
   response.sendFile(path.join(__dirname, "index.html"));
 });
 
-app.listen(PORT, () => {
-  console.log(`Audit Organizer running on http://localhost:${PORT}`);
-});
+start();
+
+async function start() {
+  await db.init();
+  app.listen(PORT, () => {
+    console.log(`Audit Organizer running on http://localhost:${PORT}`);
+  });
+}
+
+function buildEmailSubject(assignment) {
+  return `${assignment.shiftName} audit assignment for ${formatDate(assignment.auditDate)}`;
+}
+
+function buildEmailText(assignment) {
+  return [
+    `Hi ${assignment.employeeName},`,
+    "",
+    `Please complete today's shelf audit for shelves ${assignment.shelfLabel}.`,
+    `Total shelves assigned: ${assignment.shelfCount}.`,
+    "",
+    `Shift: ${assignment.shiftName}`,
+    `Date: ${formatDate(assignment.auditDate)}`,
+    "",
+    `Thank you,`,
+    assignment.managerName,
+  ].join("\n");
+}
+
+function buildEmailHtml(assignment) {
+  return `
+    <p>Hi ${escapeHtml(assignment.employeeName)},</p>
+    <p>Please complete today's shelf audit for shelves <strong>${escapeHtml(assignment.shelfLabel)}</strong>.</p>
+    <p>Total shelves assigned: <strong>${assignment.shelfCount}</strong>.</p>
+    <p>Shift: ${escapeHtml(assignment.shiftName)}<br>Date: ${escapeHtml(formatDate(assignment.auditDate))}</p>
+    <p>Thank you,<br>${escapeHtml(assignment.managerName)}</p>
+  `;
+}
+
+function formatDate(dateString) {
+  const date = new Date(`${dateString}T00:00:00`);
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
+}
 
 function sanitizeName(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -375,12 +333,17 @@ function sanitizeDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value.trim()) ? value.trim() : "";
 }
 
-function managerExists(managerId) {
-  return Boolean(db.prepare("SELECT 1 FROM managers WHERE id = ?").get(managerId));
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function handleDatabaseError(error, response, entityName) {
-  if (String(error.message).includes("UNIQUE")) {
+  if (String(error.message).includes("UNIQUE") || String(error.code) === "23505") {
     return response.status(409).json({ error: `That ${entityName} email is already saved.` });
   }
 
