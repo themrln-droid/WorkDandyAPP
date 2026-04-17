@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Audit Organizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Shift Planning</p>
+        <h1>Audit Organizer</h1>
+        <p class="hero-copy">
+          Divide 48 shelves evenly across the employees on shift, manage separate manager rosters,
+          and prepare daily audit emails in a few clicks.
+        </p>
+      </div>
+      <section class="hero-card">
+        <p class="hero-label">Today's Goal</p>
+        <div class="stat-row">
+          <span>48</span>
+          <p>Total shelves to audit each shift</p>
+        </div>
+        <div class="chip-row">
+          <span class="chip">Manager profiles</span>
+          <span class="chip">Employee email list</span>
+          <span class="chip">Shift assignments</span>
+        </div>
+      </section>
+    </header>
+
+    <main class="layout">
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">Step 1</p>
+            <h2>Managers</h2>
+          </div>
+          <button id="add-manager-btn" class="secondary-btn" type="button">Add Manager</button>
+        </div>
+
+        <form id="manager-form" class="stacked-form">
+          <div class="field-grid">
+            <label>
+              Manager name
+              <input id="manager-name" name="managerName" type="text" maxlength="60" placeholder="Example: Jamie Cruz" required>
+            </label>
+            <label>
+              Manager email
+              <input id="manager-email" name="managerEmail" type="email" maxlength="120" placeholder="jamie@example.com" required>
+            </label>
+          </div>
+          <div class="form-actions">
+            <button id="save-manager-btn" class="primary-btn" type="submit">Save Manager</button>
+            <button id="cancel-manager-btn" class="ghost-btn hidden" type="button">Cancel Edit</button>
+          </div>
+        </form>
+
+        <label class="manager-picker">
+          Active manager
+          <select id="manager-select"></select>
+        </label>
+
+        <div id="manager-empty" class="empty-state hidden">
+          Add your first manager to start building an employee roster.
+        </div>
+
+        <ul id="manager-list" class="manager-list"></ul>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">Step 2</p>
+            <h2>Employees</h2>
+          </div>
+        </div>
+
+        <form id="employee-form" class="stacked-form">
+          <div class="field-grid">
+            <label>
+              Employee name
+              <input id="employee-name" name="employeeName" type="text" maxlength="60" placeholder="Example: Alex Kim" required>
+            </label>
+            <label>
+              Work email
+              <input id="employee-email" name="employeeEmail" type="email" maxlength="120" placeholder="alex@example.com" required>
+            </label>
+          </div>
+          <div class="form-actions">
+            <button id="save-employee-btn" class="primary-btn" type="submit">Save Employee</button>
+            <button id="cancel-employee-btn" class="ghost-btn hidden" type="button">Cancel Edit</button>
+          </div>
+        </form>
+
+        <div id="employee-empty" class="empty-state hidden">
+          Select or create a manager before adding employees.
+        </div>
+
+        <ul id="employee-list" class="employee-list"></ul>
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">Step 3</p>
+            <h2>Daily Shift Assignment</h2>
+          </div>
+          <button id="assign-btn" class="primary-btn" type="button">Assign 48 Shelves</button>
+        </div>
+
+        <div class="field-grid">
+          <label>
+            Shift name
+            <input id="shift-name" type="text" maxlength="50" placeholder="Example: Day Shift">
+          </label>
+          <label>
+            Audit date
+            <input id="audit-date" type="date">
+          </label>
+        </div>
+
+        <div class="selection-header">
+          <div>
+            <h3>Employees present today</h3>
+            <p>Select the employees on shift. The app splits shelves as evenly as possible.</p>
+          </div>
+          <button id="select-all-btn" class="secondary-btn" type="button">Toggle All</button>
+        </div>
+
+        <div id="attendance-list" class="attendance-list"></div>
+
+        <div id="assignment-summary" class="summary-card">
+          <p>No assignments yet. Choose employees present today, then click <strong>Assign 48 Shelves</strong>.</p>
+        </div>
+
+        <div class="panel-heading email-heading">
+          <div>
+            <p class="section-kicker">Step 4</p>
+            <h2>Email Drafts</h2>
+          </div>
+          <button id="send-all-btn" class="secondary-btn" type="button">Open All Email Drafts</button>
+        </div>
+
+        <div id="email-actions" class="email-actions empty-state">
+          Generate assignments first to prepare email drafts for the selected employees.
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <template id="manager-item-template">
+    <li class="entity-card">
+      <div>
+        <h3 class="entity-name"></h3>
+        <p class="entity-subtitle"></p>
+      </div>
+      <div class="entity-actions">
+        <button class="ghost-btn edit-manager-btn" type="button">Edit</button>
+        <button class="danger-btn delete-manager-btn" type="button">Delete</button>
+      </div>
+    </li>
+  </template>
+
+  <template id="employee-item-template">
+    <li class="entity-card">
+      <div>
+        <h3 class="entity-name"></h3>
+        <p class="entity-subtitle"></p>
+      </div>
+      <div class="entity-actions">
+        <button class="ghost-btn edit-employee-btn" type="button">Edit</button>
+        <button class="danger-btn delete-employee-btn" type="button">Delete</button>
+      </div>
+    </li>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
