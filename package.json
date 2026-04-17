@@ -1,0 +1,16 @@
+{
+  "name": "audit-organizer",
+  "version": "1.0.0",
+  "description": "Audit organizer with manager rosters, shelf assignments, and SQLite persistence.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

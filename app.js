@@ -1,7 +1,15 @@
-const STORAGE_KEY = "audit-organizer-state-v1";
 const TOTAL_SHELVES = 48;
 
-const state = loadState();
+const state = {
+  managers: [],
+  activeManagerId: null,
+  employees: [],
+  presentEmployeeIds: [],
+  assignments: [],
+  shiftName: "Day Shift",
+  auditDate: getTodayDateInputValue(),
+  loading: false,
+};
 
 const elements = {
   managerForm: document.getElementById("manager-form"),
@@ -37,17 +45,13 @@ const uiState = {
   editingEmployeeId: null,
 };
 
-initialize();
+initialize().catch(handleUnexpectedError);
 
-function initialize() {
-  if (!state.managers.length) {
-    seedExampleData();
-  }
-
-  elements.auditDate.value = getTodayDateInputValue();
-
+async function initialize() {
   bindEvents();
-  render();
+  elements.auditDate.value = state.auditDate;
+  elements.shiftName.value = state.shiftName;
+  await loadManagers();
 }
 
 function bindEvents() {
@@ -64,53 +68,53 @@ function bindEvents() {
   elements.auditDate.addEventListener("change", persistShiftFields);
 }
 
-function loadState() {
-  const fallback = {
-    managers: [],
-    activeManagerId: null,
-    shiftName: "",
-    auditDate: "",
-    assignments: [],
-  };
+async function loadManagers(preferredManagerId) {
+  setLoading(true);
 
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? { ...fallback, ...JSON.parse(raw) } : fallback;
-  } catch (error) {
-    console.error("Failed to load local state", error);
-    return fallback;
+    state.managers = await requestJson("/api/managers");
+
+    if (!state.managers.length) {
+      state.activeManagerId = null;
+      state.employees = [];
+      state.presentEmployeeIds = [];
+      state.assignments = [];
+      render();
+      return;
+    }
+
+    const activeStillExists = state.managers.some((manager) => manager.id === state.activeManagerId);
+    state.activeManagerId = preferredManagerId || (activeStillExists ? state.activeManagerId : state.managers[0].id);
+    await loadActiveManagerData();
+  } finally {
+    setLoading(false);
   }
 }
 
-function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-}
+async function loadActiveManagerData() {
+  if (!state.activeManagerId) {
+    state.employees = [];
+    state.presentEmployeeIds = [];
+    state.assignments = [];
+    render();
+    return;
+  }
 
-function seedExampleData() {
-  const managerId = crypto.randomUUID();
+  const [employees, assignments] = await Promise.all([
+    requestJson(`/api/managers/${state.activeManagerId}/employees`),
+    requestJson(`/api/managers/${state.activeManagerId}/assignments`),
+  ]);
 
-  state.managers = [
-    {
-      id: managerId,
-      name: "Jamie Cruz",
-      email: "jamie.cruz@warehouse.example",
-      employees: [
-        { id: crypto.randomUUID(), name: "Alex Kim", email: "alex.kim@warehouse.example" },
-        { id: crypto.randomUUID(), name: "Riley Patel", email: "riley.patel@warehouse.example" },
-        { id: crypto.randomUUID(), name: "Jordan Lee", email: "jordan.lee@warehouse.example" },
-      ],
-      presentEmployeeIds: [],
-    },
-  ];
+  state.employees = employees;
+  state.assignments = assignments;
+  state.presentEmployeeIds = assignments.map((assignment) => assignment.employeeId);
 
-  state.activeManagerId = managerId;
-  state.shiftName = "Day Shift";
-  state.auditDate = getTodayDateInputValue();
-  saveState();
-}
+  if (assignments.length) {
+    state.shiftName = assignments[0].shiftName;
+    state.auditDate = assignments[0].auditDate;
+  }
 
-function getActiveManager() {
-  return state.managers.find((manager) => manager.id === state.activeManagerId) || null;
+  render();
 }
 
 function render() {
@@ -135,11 +139,9 @@ function renderManagers() {
   } else {
     for (const manager of state.managers) {
       const option = document.createElement("option");
-      option.value = manager.id;
-      option.textContent = `${manager.name} (${manager.employees.length} employees)`;
-      if (manager.id === state.activeManagerId) {
-        option.selected = true;
-      }
+      option.value = String(manager.id);
+      option.textContent = `${manager.name} (${manager.employeeCount} employees)`;
+      option.selected = manager.id === state.activeManagerId;
       elements.managerSelect.appendChild(option);
     }
   }
@@ -151,7 +153,7 @@ function renderManagers() {
     const item = fragment.querySelector(".entity-card");
 
     fragment.querySelector(".entity-name").textContent = manager.name;
-    fragment.querySelector(".entity-subtitle").textContent = `${manager.email} | ${manager.employees.length} employees saved`;
+    fragment.querySelector(".entity-subtitle").textContent = `${manager.email} | ${manager.employeeCount} employees saved`;
 
     fragment.querySelector(".edit-manager-btn").addEventListener("click", () => {
       uiState.editingManagerId = manager.id;
@@ -162,7 +164,17 @@ function renderManagers() {
       elements.managerName.focus();
     });
 
-    fragment.querySelector(".delete-manager-btn").addEventListener("click", () => deleteManager(manager.id));
+    fragment.querySelector(".delete-manager-btn").addEventListener("click", async () => {
+      const confirmed = confirm(`Delete manager ${manager.name} and all saved employees?`);
+      if (!confirmed) {
+        return;
+      }
+
+      await requestJson(`/api/managers/${manager.id}`, { method: "DELETE" });
+      resetManagerForm();
+      resetEmployeeForm();
+      await loadManagers();
+    });
 
     if (manager.id === state.activeManagerId) {
       item.style.borderColor = "rgba(15, 122, 107, 0.4)";
@@ -173,20 +185,17 @@ function renderManagers() {
 }
 
 function renderEmployees() {
-  const manager = getActiveManager();
-  const hasManager = Boolean(manager);
-
+  const hasManager = Boolean(state.activeManagerId);
   elements.employeeForm.classList.toggle("hidden", !hasManager);
   elements.employeeEmpty.classList.toggle("hidden", hasManager);
   elements.employeeList.innerHTML = "";
 
-  if (!manager) {
+  if (!hasManager) {
     return;
   }
 
-  for (const employee of manager.employees) {
+  for (const employee of state.employees) {
     const fragment = elements.employeeItemTemplate.content.cloneNode(true);
-
     fragment.querySelector(".entity-name").textContent = employee.name;
     fragment.querySelector(".entity-subtitle").textContent = employee.email;
 
@@ -199,31 +208,40 @@ function renderEmployees() {
       elements.employeeName.focus();
     });
 
-    fragment.querySelector(".delete-employee-btn").addEventListener("click", () => deleteEmployee(employee.id));
+    fragment.querySelector(".delete-employee-btn").addEventListener("click", async () => {
+      const confirmed = confirm(`Delete employee ${employee.name}?`);
+      if (!confirmed) {
+        return;
+      }
+
+      await requestJson(`/api/managers/${state.activeManagerId}/employees/${employee.id}`, { method: "DELETE" });
+      await clearAssignments();
+      resetEmployeeForm();
+      await loadManagers(state.activeManagerId);
+    });
 
     elements.employeeList.appendChild(fragment);
   }
 }
 
 function renderAttendance() {
-  const manager = getActiveManager();
   elements.attendanceList.innerHTML = "";
 
-  if (!manager || !manager.employees.length) {
+  if (!state.activeManagerId || !state.employees.length) {
     elements.attendanceList.innerHTML = `
       <div class="empty-state">Add employees to the active manager profile to start a shift assignment.</div>
     `;
     return;
   }
 
-  const savedIds = new Set(manager.presentEmployeeIds || []);
+  const selectedIds = new Set(state.presentEmployeeIds);
 
-  for (const employee of manager.employees) {
+  for (const employee of state.employees) {
     const wrapper = document.createElement("div");
     wrapper.className = "attendance-item";
     wrapper.innerHTML = `
       <label>
-        <input type="checkbox" ${savedIds.has(employee.id) ? "checked" : ""}>
+        <input type="checkbox" ${selectedIds.has(employee.id) ? "checked" : ""}>
         <span>
           <strong>${employee.name}</strong><br>
           <span class="entity-subtitle">${employee.email}</span>
@@ -232,8 +250,8 @@ function renderAttendance() {
       <span class="chip">Ready for assignment</span>
     `;
 
-    wrapper.querySelector("input").addEventListener("change", (event) => {
-      updateAttendance(employee.id, event.target.checked);
+    wrapper.querySelector("input").addEventListener("change", async (event) => {
+      await updateAttendance(employee.id, event.target.checked);
     });
 
     elements.attendanceList.appendChild(wrapper);
@@ -241,10 +259,7 @@ function renderAttendance() {
 }
 
 function renderAssignments() {
-  const manager = getActiveManager();
-  const assignments = state.assignments.filter((item) => item.managerId === state.activeManagerId);
-
-  if (!manager || !assignments.length) {
+  if (!state.activeManagerId || !state.assignments.length) {
     elements.assignmentSummary.innerHTML = `
       <p>No assignments yet. Choose employees present today, then click <strong>Assign 48 Shelves</strong>.</p>
     `;
@@ -257,13 +272,13 @@ function renderAssignments() {
   const dateLabel = formatDate(state.auditDate);
 
   elements.assignmentSummary.innerHTML = `
-    <p><strong>${shiftLabel}</strong> on <strong>${dateLabel}</strong>. ${assignments.length} employees are covering all ${TOTAL_SHELVES} shelves.</p>
+    <p><strong>${shiftLabel}</strong> on <strong>${dateLabel}</strong>. ${state.assignments.length} employees are covering all ${TOTAL_SHELVES} shelves.</p>
     <div class="summary-table"></div>
   `;
 
   const table = elements.assignmentSummary.querySelector(".summary-table");
 
-  for (const assignment of assignments) {
+  for (const assignment of state.assignments) {
     const row = document.createElement("div");
     row.className = "summary-table-row";
     row.innerHTML = `
@@ -280,7 +295,7 @@ function renderAssignments() {
   elements.emailActions.className = "email-actions";
   elements.emailActions.innerHTML = "";
 
-  for (const assignment of assignments) {
+  for (const assignment of state.assignments) {
     const card = document.createElement("div");
     card.className = "email-card";
     card.innerHTML = `
@@ -302,104 +317,76 @@ function renderAssignments() {
   }
 }
 
-function handleManagerSubmit(event) {
+async function handleManagerSubmit(event) {
   event.preventDefault();
 
-  const name = elements.managerName.value.trim();
-  const email = elements.managerEmail.value.trim().toLowerCase();
+  const payload = {
+    name: elements.managerName.value.trim(),
+    email: elements.managerEmail.value.trim().toLowerCase(),
+  };
 
-  if (!name || !email) {
-    return;
-  }
-
-  const duplicate = state.managers.find((manager) => {
-    return manager.email === email && manager.id !== uiState.editingManagerId;
-  });
-
-  if (duplicate) {
-    alert("That manager email is already saved.");
+  if (!payload.name || !payload.email) {
     return;
   }
 
   if (uiState.editingManagerId) {
-    const manager = state.managers.find((item) => item.id === uiState.editingManagerId);
-    if (!manager) {
-      return;
-    }
-
-    manager.name = name;
-    manager.email = email;
-  } else {
-    const manager = {
-      id: crypto.randomUUID(),
-      name,
-      email,
-      employees: [],
-      presentEmployeeIds: [],
-    };
-
-    state.managers.push(manager);
-    state.activeManagerId = manager.id;
-  }
-
-  clearAssignments(uiState.editingManagerId || state.activeManagerId);
-  saveState();
-  resetManagerForm();
-  render();
-}
-
-function handleEmployeeSubmit(event) {
-  event.preventDefault();
-
-  const manager = getActiveManager();
-  if (!manager) {
+    await requestJson(`/api/managers/${uiState.editingManagerId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    resetManagerForm();
+    await loadManagers(uiState.editingManagerId);
     return;
   }
 
-  const name = elements.employeeName.value.trim();
-  const email = elements.employeeEmail.value.trim().toLowerCase();
-
-  if (!name || !email) {
-    return;
-  }
-
-  const duplicate = manager.employees.find((employee) => {
-    return employee.email === email && employee.id !== uiState.editingEmployeeId;
+  const manager = await requestJson("/api/managers", {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 
-  if (duplicate) {
-    alert("That employee email is already saved for this manager.");
+  resetManagerForm();
+  await loadManagers(manager.id);
+}
+
+async function handleEmployeeSubmit(event) {
+  event.preventDefault();
+
+  if (!state.activeManagerId) {
+    return;
+  }
+
+  const payload = {
+    name: elements.employeeName.value.trim(),
+    email: elements.employeeEmail.value.trim().toLowerCase(),
+  };
+
+  if (!payload.name || !payload.email) {
     return;
   }
 
   if (uiState.editingEmployeeId) {
-    const employee = manager.employees.find((item) => item.id === uiState.editingEmployeeId);
-    if (!employee) {
-      return;
-    }
-
-    employee.name = name;
-    employee.email = email;
+    await requestJson(`/api/managers/${state.activeManagerId}/employees/${uiState.editingEmployeeId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
   } else {
-    manager.employees.push({
-      id: crypto.randomUUID(),
-      name,
-      email,
+    await requestJson(`/api/managers/${state.activeManagerId}/employees`, {
+      method: "POST",
+      body: JSON.stringify(payload),
     });
   }
 
-  clearAssignments(state.activeManagerId);
-  saveState();
+  await clearAssignments();
   resetEmployeeForm();
-  render();
+  await loadManagers(state.activeManagerId);
 }
 
-function handleManagerSelection(event) {
-  state.activeManagerId = event.target.value || null;
+async function handleManagerSelection(event) {
+  state.activeManagerId = Number(event.target.value) || null;
+  state.presentEmployeeIds = [];
   resetManagerForm();
   resetEmployeeForm();
-  saveState();
-  render();
+  await loadActiveManagerData();
 }
 
 function resetManagerForm() {
@@ -416,140 +403,70 @@ function resetEmployeeForm() {
   elements.cancelEmployeeBtn.classList.add("hidden");
 }
 
-function deleteManager(managerId) {
-  const manager = state.managers.find((item) => item.id === managerId);
-  if (!manager) {
-    return;
-  }
-
-  const confirmed = confirm(`Delete manager ${manager.name} and all saved employees?`);
-  if (!confirmed) {
-    return;
-  }
-
-  state.managers = state.managers.filter((item) => item.id !== managerId);
-
-  if (state.activeManagerId === managerId) {
-    state.activeManagerId = state.managers[0]?.id || null;
-  }
-
-  clearAssignments(managerId);
-  saveState();
-  resetManagerForm();
-  render();
-}
-
-function deleteEmployee(employeeId) {
-  const manager = getActiveManager();
-  if (!manager) {
-    return;
-  }
-
-  const employee = manager.employees.find((item) => item.id === employeeId);
-  if (!employee) {
-    return;
-  }
-
-  const confirmed = confirm(`Delete employee ${employee.name}?`);
-  if (!confirmed) {
-    return;
-  }
-
-  manager.employees = manager.employees.filter((item) => item.id !== employeeId);
-  manager.presentEmployeeIds = (manager.presentEmployeeIds || []).filter((id) => id !== employeeId);
-  clearAssignments(state.activeManagerId);
-  saveState();
-  resetEmployeeForm();
-  render();
-}
-
-function updateAttendance(employeeId, isPresent) {
-  const manager = getActiveManager();
-  if (!manager) {
-    return;
-  }
-
-  const presentSet = new Set(manager.presentEmployeeIds || []);
+async function updateAttendance(employeeId, isPresent) {
+  const selected = new Set(state.presentEmployeeIds);
 
   if (isPresent) {
-    presentSet.add(employeeId);
+    selected.add(employeeId);
   } else {
-    presentSet.delete(employeeId);
+    selected.delete(employeeId);
   }
 
-  manager.presentEmployeeIds = Array.from(presentSet);
-  clearAssignments(state.activeManagerId);
-  saveState();
+  state.presentEmployeeIds = Array.from(selected);
+  await clearAssignments();
+  renderAssignments();
 }
 
-function toggleAllAttendance() {
-  const manager = getActiveManager();
-  if (!manager || !manager.employees.length) {
+async function toggleAllAttendance() {
+  if (!state.employees.length) {
     return;
   }
 
-  const allSelected = manager.presentEmployeeIds?.length === manager.employees.length;
-  manager.presentEmployeeIds = allSelected ? [] : manager.employees.map((employee) => employee.id);
-  clearAssignments(state.activeManagerId);
-  saveState();
+  const allSelected = state.presentEmployeeIds.length === state.employees.length;
+  state.presentEmployeeIds = allSelected ? [] : state.employees.map((employee) => employee.id);
+  await clearAssignments();
   renderAttendance();
   renderAssignments();
 }
 
 function persistShiftFields() {
   state.shiftName = elements.shiftName.value.trim();
-  state.auditDate = elements.auditDate.value;
-  saveState();
+  state.auditDate = elements.auditDate.value || getTodayDateInputValue();
 }
 
-function generateAssignments() {
-  const manager = getActiveManager();
-  if (!manager) {
+async function generateAssignments() {
+  if (!state.activeManagerId) {
     alert("Create or choose a manager first.");
-    return;
-  }
-
-  const presentIds = manager.presentEmployeeIds || [];
-  const presentEmployees = manager.employees.filter((employee) => presentIds.includes(employee.id));
-
-  if (!presentEmployees.length) {
-    alert("Select at least one employee who is present for this shift.");
     return;
   }
 
   persistShiftFields();
 
-  const baseCount = Math.floor(TOTAL_SHELVES / presentEmployees.length);
-  const remainder = TOTAL_SHELVES % presentEmployees.length;
-  let nextShelf = 1;
+  if (!state.presentEmployeeIds.length) {
+    alert("Select at least one employee who is present for this shift.");
+    return;
+  }
 
-  state.assignments = presentEmployees.map((employee, index) => {
-    const shelfCount = baseCount + (index < remainder ? 1 : 0);
-    const startShelf = nextShelf;
-    const endShelf = nextShelf + shelfCount - 1;
-    nextShelf = endShelf + 1;
-
-    return {
-      managerId: manager.id,
-      managerName: manager.name,
-      managerEmail: manager.email,
-      employeeId: employee.id,
-      employeeName: employee.name,
-      employeeEmail: employee.email,
-      shelfCount,
-      shelves: shelfCount ? createShelfRange(startShelf, endShelf) : [],
-      shelfLabel: shelfCount ? `${startShelf}-${endShelf}` : "No shelves assigned",
+  state.assignments = await requestJson(`/api/managers/${state.activeManagerId}/assignments`, {
+    method: "POST",
+    body: JSON.stringify({
+      presentEmployeeIds: state.presentEmployeeIds,
       shiftName: state.shiftName || "Current Shift",
-      auditDate: state.auditDate || getTodayDateInputValue(),
-    };
+      auditDate: state.auditDate,
+    }),
   });
 
-  saveState();
   renderAssignments();
 }
 
-function createShelfRange(start, end) {
-  return Array.from({ length: end - start + 1 }, (_, index) => start + index);
+async function clearAssignments() {
+  if (!state.activeManagerId) {
+    state.assignments = [];
+    return;
+  }
+
+  await requestJson(`/api/managers/${state.activeManagerId}/assignments`, { method: "DELETE" });
+  state.assignments = [];
 }
 
 function buildEmailSubject(assignment) {
@@ -578,16 +495,43 @@ function openMailDraft(assignment) {
 }
 
 function openAllDrafts() {
-  const assignments = state.assignments.filter((item) => item.managerId === state.activeManagerId);
-
-  if (!assignments.length) {
+  if (!state.assignments.length) {
     alert("Generate assignments first.");
     return;
   }
 
-  for (const assignment of assignments) {
+  for (const assignment of state.assignments) {
     openMailDraft(assignment);
   }
+}
+
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, {
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+    ...options,
+  });
+
+  if (response.status === 204) {
+    return null;
+  }
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.error || "Request failed.");
+  }
+
+  return data;
+}
+
+function setLoading(isLoading) {
+  state.loading = isLoading;
+  elements.assignBtn.disabled = isLoading;
+  elements.saveManagerBtn.disabled = isLoading;
+  elements.saveEmployeeBtn.disabled = isLoading;
 }
 
 function formatDate(dateString) {
@@ -603,15 +547,6 @@ function formatDate(dateString) {
   }).format(date);
 }
 
-function clearAssignments(managerId) {
-  if (!managerId) {
-    state.assignments = [];
-    return;
-  }
-
-  state.assignments = state.assignments.filter((assignment) => assignment.managerId !== managerId);
-}
-
 function getTodayDateInputValue() {
   const now = new Date();
   const year = now.getFullYear();
@@ -619,3 +554,17 @@ function getTodayDateInputValue() {
   const day = String(now.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
+
+function handleUnexpectedError(error) {
+  console.error(error);
+  alert(error.message || "Something went wrong.");
+}
+
+window.addEventListener("error", (event) => {
+  handleUnexpectedError(event.error || new Error("Unexpected error."));
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  handleUnexpectedError(event.reason instanceof Error ? event.reason : new Error("Request failed."));
+});
+
