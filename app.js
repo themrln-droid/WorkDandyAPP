@@ -470,6 +470,15 @@ async function generateAssignments() {
   });
 
   renderAssignments();
+
+  if (state.emailEnabled && state.assignments.length > 0) {
+    try {
+      await sendAllEmails();
+    } catch (err) {
+      console.error("Failed to automatically send emails:", err);
+      alert("Assignments generated, but failed to automatically send emails: " + err.message);
+    }
+  }
 }
 
 async function clearAssignments() {

@@ -217,19 +217,29 @@ app.post("/api/managers/:managerId/send-emails", async (request, response) => {
   const sent = [];
 
   for (const assignment of assignments) {
-    const result = await resend.emails.send({
-      from: process.env.EMAIL_FROM,
-      to: [assignment.employeeEmail],
-      subject: buildEmailSubject(assignment),
-      html: buildEmailHtml(assignment),
-      text: buildEmailText(assignment),
-      replyTo: process.env.EMAIL_REPLY_TO || undefined,
-    });
+    try {
+      const result = await resend.emails.send({
+        from: process.env.EMAIL_FROM,
+        to: [assignment.employeeEmail],
+        subject: buildEmailSubject(assignment),
+        html: buildEmailHtml(assignment),
+        text: buildEmailText(assignment),
+        replyTo: process.env.EMAIL_REPLY_TO || undefined,
+      });
 
-    sent.push({
-      employeeEmail: assignment.employeeEmail,
-      id: result.data?.id || null,
-    });
+      if (result.error) {
+        console.error("Resend API Error for", assignment.employeeEmail, ":", result.error);
+        return response.status(500).json({ error: `Failed to send email to ${assignment.employeeEmail}: ${result.error.message || "Unknown error"}` });
+      }
+
+      sent.push({
+        employeeEmail: assignment.employeeEmail,
+        id: result.data?.id || null,
+      });
+    } catch (err) {
+      console.error("Exception sending email to", assignment.employeeEmail, ":", err);
+      return response.status(500).json({ error: `Exception sending email to ${assignment.employeeEmail}: ${err.message || "Unknown error"}` });
+    }
   }
 
   response.json({ sentCount: sent.length, sent });
@@ -254,16 +264,26 @@ app.post("/api/managers/:managerId/assignments/:assignmentId/send-email", async 
     return response.status(404).json({ error: "Assignment not found." });
   }
 
-  const result = await resend.emails.send({
-    from: process.env.EMAIL_FROM,
-    to: [assignment.employeeEmail],
-    subject: buildEmailSubject(assignment),
-    html: buildEmailHtml(assignment),
-    text: buildEmailText(assignment),
-    replyTo: process.env.EMAIL_REPLY_TO || undefined,
-  });
+  try {
+    const result = await resend.emails.send({
+      from: process.env.EMAIL_FROM,
+      to: [assignment.employeeEmail],
+      subject: buildEmailSubject(assignment),
+      html: buildEmailHtml(assignment),
+      text: buildEmailText(assignment),
+      replyTo: process.env.EMAIL_REPLY_TO || undefined,
+    });
 
-  response.json({ id: result.data?.id || null });
+    if (result.error) {
+      console.error("Resend API Error for", assignment.employeeEmail, ":", result.error);
+      return response.status(500).json({ error: `Failed to send email: ${result.error.message || "Unknown error"}` });
+    }
+
+    response.json({ id: result.data?.id || null });
+  } catch (err) {
+    console.error("Exception sending email to", assignment.employeeEmail, ":", err);
+    return response.status(500).json({ error: `Exception sending email: ${err.message || "Unknown error"}` });
+  }
 });
 
 app.use((_request, response) => {
