@@ -277,10 +277,10 @@ async function createAssignments(managerId, presentEmployeeIds, shiftName, audit
       SELECT id, name, email
       FROM employees
       WHERE manager_id = $1 AND id = ANY($2::int[])
-      ORDER BY name
     `, [managerId, presentEmployeeIds]);
 
     const employees = employeeResult.rows;
+    employees.sort((a, b) => presentEmployeeIds.indexOf(a.id) - presentEmployeeIds.indexOf(b.id));
     if (!employees.length) {
       return [];
     }
@@ -325,8 +325,9 @@ async function createAssignments(managerId, presentEmployeeIds, shiftName, audit
     SELECT id, name, email
     FROM employees
     WHERE manager_id = ? AND id IN (${placeholders})
-    ORDER BY name COLLATE NOCASE
   `).all(managerId, ...presentEmployeeIds);
+
+  employees.sort((a, b) => presentEmployeeIds.indexOf(a.id) - presentEmployeeIds.indexOf(b.id));
 
   if (!employees.length) {
     return [];

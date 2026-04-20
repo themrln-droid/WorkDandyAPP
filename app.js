@@ -72,6 +72,9 @@ function bindEvents() {
   elements.sendAllBtn.addEventListener("click", openAllDrafts);
   elements.shiftName.addEventListener("input", persistShiftFields);
   elements.auditDate.addEventListener("change", persistShiftFields);
+
+  elements.attendanceList.addEventListener("dragover", handleAttendanceDragOver);
+  elements.attendanceList.addEventListener("drop", handleAttendanceDrop);
 }
 
 async function loadManagers(preferredManagerId) {
@@ -245,9 +248,12 @@ function renderAttendance() {
   for (const employee of state.employees) {
     const wrapper = document.createElement("div");
     wrapper.className = "attendance-item";
+    wrapper.draggable = true;
+    wrapper.dataset.id = employee.id;
     wrapper.innerHTML = `
-      <label>
+      <label style="cursor: grab;">
         <input type="checkbox" ${selectedIds.has(employee.id) ? "checked" : ""}>
+        <span class="drag-handle" style="margin: 0 8px; color: var(--muted); font-size: 1.2rem;">☰</span>
         <span>
           <strong>${employee.name}</strong><br>
           <span class="entity-subtitle">${employee.email}</span>
@@ -255,6 +261,9 @@ function renderAttendance() {
       </label>
       <span class="chip">Ready for assignment</span>
     `;
+
+    wrapper.addEventListener("dragstart", () => wrapper.classList.add("dragging"));
+    wrapper.addEventListener("dragend", () => wrapper.classList.remove("dragging"));
 
     wrapper.querySelector("input").addEventListener("change", async (event) => {
       await updateAttendance(employee.id, event.target.checked);
@@ -629,4 +638,51 @@ window.addEventListener("error", (event) => {
 window.addEventListener("unhandledrejection", (event) => {
   handleUnexpectedError(event.reason instanceof Error ? event.reason : new Error("Request failed."));
 });
+
+function handleAttendanceDragOver(e) {
+  e.preventDefault();
+  const afterElement = getDragAfterElement(elements.attendanceList, e.clientY);
+  const draggingElement = elements.attendanceList.querySelector(".dragging");
+  
+  if (!draggingElement) return;
+
+  if (afterElement == null) {
+    elements.attendanceList.appendChild(draggingElement);
+  } else {
+    elements.attendanceList.insertBefore(draggingElement, afterElement);
+  }
+}
+
+async function handleAttendanceDrop(e) {
+  e.preventDefault();
+  const draggingElement = elements.attendanceList.querySelector(".dragging");
+  if (!draggingElement) return;
+
+  const newOrderIds = Array.from(elements.attendanceList.children).map(child => Number(child.dataset.id));
+  
+  // Update the master list
+  state.employees.sort((a, b) => newOrderIds.indexOf(a.id) - newOrderIds.indexOf(b.id));
+  
+  // Re-build presentEmployeeIds keeping the selections but in the new order
+  const previouslySelected = new Set(state.presentEmployeeIds);
+  state.presentEmployeeIds = newOrderIds.filter(id => previouslySelected.has(id));
+
+  await clearAssignments();
+  renderAssignments();
+}
+
+function getDragAfterElement(container, y) {
+  const draggableElements = [...container.querySelectorAll(".attendance-item:not(.dragging)")];
+
+  return draggableElements.reduce((closest, child) => {
+    const box = child.getBoundingClientRect();
+    const offset = y - box.top - box.height / 2;
+    if (offset < 0 && offset > closest.offset) {
+      return { offset: offset, element: child };
+    } else {
+      return closest;
+    }
+  }, { offset: Number.NEGATIVE_INFINITY }).element;
+}
+
 
